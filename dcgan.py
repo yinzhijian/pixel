@@ -98,6 +98,7 @@ class Generator(nn.Module):
         # input: (batch, 100)
         self.l1 = nn.Sequential(
             nn.Linear(in_dim, feature_dim * 8 * 4 * 4, bias=False),
+            #nn.InstanceNorm1d(feature_dim * 8 * 4 * 4),
             nn.BatchNorm1d(feature_dim * 8 * 4 * 4),
             nn.ReLU()
         )
@@ -117,15 +118,24 @@ class Generator(nn.Module):
         return nn.Sequential(
             nn.ConvTranspose2d(in_dim, out_dim, kernel_size=5, stride=2,
                                padding=2, output_padding=1, bias=False),  # double height and width
+            #nn.InstanceNorm2d(out_dim),
             nn.BatchNorm2d(out_dim),
             nn.ReLU(True)
         )
 
     def forward(self, x):
         y = self.l1(x)
+        #print(f"l1:{y.shape}")
+        # torch.Size([64, 8192]) = 8192
         y = y.view(y.size(0), -1, 4, 4)
+        #print(f"y view:{y.shape}")
+        # view:torch.Size([64, 512, 4, 4])
         y = self.l2(y)
+        # torch.Size([64, 64, 32, 32])=65536
+        #print(f"l2:{y.shape}")
         y = self.l3(y)
+        # torch.Size([64, 3, 64, 64])=12288
+        #print(f"l3:{y.shape}")
         return y
 
 
@@ -166,7 +176,8 @@ class Discriminator(nn.Module):
 
         return nn.Sequential(
             nn.Conv2d(in_dim, out_dim, 4, 2, 1),
-            nn.BatchNorm2d(out_dim),
+            nn.InstanceNorm2d(out_dim),
+            #nn.BatchNorm2d(out_dim),
             nn.LeakyReLU(0.2),
         )
 
@@ -231,11 +242,30 @@ class TrainerGAN():
         self.G.train()
         self.D.train()
 
-    def gp(self):
+    def gp(self, r_imgs, f_imgs):
         """
         Implement gradient penalty function
-        """
-        pass
+        Calculates the gradient penalty loss for WGAN GP"""
+        # Random weight term for interpolation between real and fake samples
+        alpha = torch.Tensor(np.random.random((r_imgs.size(0), 1, 1, 1))).cuda()
+        #print(f"alpha: {alpha.shape}")
+        # Get random interpolation between real and fake samples
+        interpolates = (alpha * r_imgs + ((1 - alpha) * f_imgs)).requires_grad_(True)
+        #print(f"interpolates: {interpolates.shape}")
+        d_interpolates = self.D(interpolates)
+        fake = Variable(torch.Tensor(r_imgs.shape[0]).fill_(1.0).cuda(), requires_grad=False)
+        # Get gradient w.r.t. interpolates
+        gradients = torch.autograd.grad(
+            outputs=d_interpolates,
+            inputs=interpolates,
+            grad_outputs=fake,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+        gradients = gradients.view(gradients.size(0), -1)
+        gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+        return gradient_penalty
 
     def train(self):
         """
@@ -277,7 +307,9 @@ class TrainerGAN():
                 # Loss for discriminator
                 r_loss = self.loss(r_logit, r_label)
                 f_loss = self.loss(f_logit, f_label)
-                loss_D = (r_loss + f_loss) / 2
+                #loss_D = (r_loss + f_loss) / 2
+                gradient_penalty = self.gp(r_imgs, f_imgs)
+                loss_D = -torch.mean(r_logit) + torch.mean(f_logit) + gradient_penalty
 
                 # Discriminator backwarding
                 self.D.zero_grad()
@@ -311,7 +343,8 @@ class TrainerGAN():
                     WGAN-GP: loss_G = -torch.mean(self.D(f_imgs))
                     """
                     # Loss for the generator.
-                    loss_G = self.loss(f_logit, r_label)
+                    #loss_G = self.loss(f_logit, r_label)
+                    loss_G = -torch.mean(f_logit)
 
                     # Generator backwarding
                     self.G.zero_grad()
@@ -368,10 +401,10 @@ class TrainerGAN():
 
 
 config = {
-    "model_type": "GAN",
+    "model_type": "WGAN-GP",
     "batch_size": 64,
     "lr": 1e-4,
-    "n_epoch": 1,
+    "n_epoch": 200,
     "n_critic": 1,
     "z_dim": 100,
     "workspace_dir": workspace_dir, # define in the environment setting
