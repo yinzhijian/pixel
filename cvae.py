@@ -2,6 +2,7 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
@@ -12,12 +13,13 @@ import numpy as np
 # 定义超参数
 batch_size = 64
 learning_rate = 0.01
-num_epochs = 30
+num_epochs = 10
+num_classes=10
 
 # 数据预处理
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
+    #transforms.Normalize((0.5,), (0.5,))
 ])
 
 # 下载并加载数据
@@ -31,69 +33,70 @@ test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=Fa
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
+        # 条件编码器
+        self.fcc = nn.Linear(num_classes, 2) #均值
         # 编码器
-        self.encoder = nn.Sequential(
-            nn.Linear(28*28, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 16),
-            nn.ReLU(),
-            nn.Linear(16, 4), # 压缩到2个正太分布（2，2），以便可视化
-        )
+        self.fc1 = nn.Linear(28 * 28, 400)
+        self.fc21 = nn.Linear(400, 2)  # 均值
+        self.fc22 = nn.Linear(400, 2)  # 对数方差
+
         # 解码器
-        self.decoder = nn.Sequential(
-            nn.Linear(2, 16), #实际输入为2个随机采样
-            nn.ReLU(),
-            nn.Linear(16, 64), #实际输入为2个随机采样
-            nn.ReLU(),
-            nn.Linear(64, 128),
-            nn.ReLU(),
-            nn.Linear(128, 28*28),
-            nn.Tanh()  # 输出值在-1到1之间，因为输入也被标准化到这个范围
-        )
+        self.fc3 = nn.Linear(2, 400)
+        self.fc4 = nn.Linear(400, 28 * 28)
+
+    def encode(self, x):
+        h1 = F.relu(self.fc1(x))
+        return self.fc21(h1), self.fc22(h1)
+
+    def label_mean(self, x):
+        return self.fcc(x)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
 
     def decode(self, z):
-        x = self.decoder(z)
-        x = x.view(-1, 1, 28, 28)  # 重塑为图像的形状
-        return x
+        h3 = F.relu(self.fc3(z))
+        y = torch.sigmoid(self.fc4(h3))
+        y = y.view(-1, 1, 28, 28)
+        return y
 
-    def forward(self, x):
-        # 定义前向传播
-        x = x.view(-1, 28*28)
-        #x = torch.relu(self.fc1(x))
-        y = self.encoder(x)
-        y = y.view(-1, 2, 2)
-        arr = torch.split(y, 1, dim=1)
-        #print(f"arr shape {arr[0].shape}")
-        mean = arr[0].squeeze(1)
-        #print(f"mean shape {mean.shape}")
-        logvar = arr[1].squeeze(1)
-        #print(f"var shape {variance.shape}")
-        eps = torch.randn_like(mean)
-        #print(f"e shape {e.shape}")
-        z = eps * torch.exp(0.5 * logvar) + mean
-        #print(f"z shape {z.shape}")
-        x = self.decoder(z)
-        x = x.view(-1, 1, 28, 28)
-        return x,mean,logvar,z
+    def forward(self, x, label):
+        label_mu = self.label_mean(label)
+        mu, logvar = self.encode(x.view(-1, 28*28))
+        z = self.reparameterize(mu, logvar)
+        y = self.decode(z)
+        return y, mu, logvar, label_mu, z
+
+# 定义损失函数
+def loss_function(recon_x, x, mu, logvar, label_mu):
+    #print(f"recon_x: {recon_x}, x:{x}")
+    # 重构损失
+    #BCE = F.binary_cross_entropy(recon_x.view(-1, 28*28), x.view(-1, 28*28), reduction='sum')
+    loss = F.mse_loss(recon_x,x, reduction='sum')
+    # KL散度损失
+    KLD = -0.5 * torch.sum(1 + logvar - torch.pow(mu-label_mu,2) - logvar.exp())
+    #return (BCE + KLD)/ recon_x.size(0)
+    return (loss + KLD)/ recon_x.size(0)
+
 
 def train():
     # 实例化网络
     model = Net()
 
     # 定义损失函数和优化器
-    criterion = nn.MSELoss(reduction='sum')
+    #criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # 训练模型
     for epoch in range(num_epochs):
         for i, (images, labels) in enumerate(train_loader):
+            #print(f"images:{images}, labels:{labels}")
             # 前向传播
-            outputs, mean, logvar, code = model(images)
-            loss = criterion(outputs, images)
-            kl_loss = -0.5*torch.sum(1 + logvar -logvar.exp() - mean.pow(2))
-            loss = (loss + kl_loss) / outputs.shape[0]
+            labels_one_hot = torch.nn.functional.one_hot(labels, num_classes).float()
+            outputs, mean, logvar, label_mu, code = model(images, labels_one_hot)
+            loss = loss_function(outputs, images, mean, logvar, label_mu)
 
             # 反向传播和优化
             optimizer.zero_grad()
@@ -103,20 +106,21 @@ def train():
             if (i+1) % 100 == 0:
                 print(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}')
     # 保存模型
-    torch.save(model.state_dict(), 'mnist_vae_model.pth')
+    torch.save(model.state_dict(), 'mnist_cvae_model.pth')
 
 def show_images():
     # 实例化网络
     model = Net()
-    model.load_state_dict(torch.load('mnist_vae_model.pth'))
+    model.load_state_dict(torch.load('mnist_cvae_model.pth'))
     # 测试模型
     model.eval()
     with torch.no_grad():
         # 可视化一些测试结果
         dataiter = iter(train_loader)
-        images, _ = next(dataiter)
+        images, labels = next(dataiter)
+        labels_one_hot = torch.nn.functional.one_hot(labels, num_classes).float()
         print(f"images shape: {images.shape}, size:{images.size()}")
-        output,mean,logvar, code = model(images)
+        output,mean,logvar,label_mu, code = model(images, labels_one_hot)
         # 显示原始图像和重建图像
         for i in range(6):
             # 原始图像
@@ -134,7 +138,7 @@ def show_images():
 def show_code():
     # 实例化网络
     model = Net()
-    model.load_state_dict(torch.load('mnist_vae_model.pth'))
+    model.load_state_dict(torch.load('mnist_cvae_model.pth'))
     # 确保模型处于评估模式
     model.eval()
     # 存储编码器的二维向量和对应的标签
@@ -143,7 +147,8 @@ def show_code():
     with torch.no_grad():
         for data in test_loader:
             images, label = data
-            _, _,_,code = model(images)
+            labels_one_hot = torch.nn.functional.one_hot(label, num_classes).float()
+            _, _,_,_,code = model(images,labels_one_hot)
             codes.append(code)
             labels.append(label)
     # 将所有批次的结果合并
@@ -162,12 +167,16 @@ def show_code():
 def eval_code():
     # 实例化网络
     model = Net()
-    model.load_state_dict(torch.load('mnist_vae_model.pth'))
+    model.load_state_dict(torch.load('mnist_cvae_model.pth'))
     # 确保模型处于评估模式
     model.eval()
+    labels_one_hot = torch.nn.functional.one_hot(torch.tensor([0,1,2,3,4,5,6,7,8,9]), num_classes).float()
+    label_mu = model.label_mean(labels_one_hot)
+    print(f"label_mu:{label_mu}")
     # 生成向量网格
-    x = np.linspace(-1, 1, 10)
-    y = np.linspace(-1, 1, 10)
+    x = np.add(np.linspace(-1, 1, 10), label_mu[7][0].item())
+    y = np.add(np.linspace(-1, 1, 10), label_mu[7][1].item())
+    print(f"x:{x}, y:{y}")
     xx, yy = np.meshgrid(x, y)
     grid = np.vstack([xx.ravel(), yy.ravel()]).T
     # 将numpy数组转换为torch张量
@@ -182,7 +191,7 @@ def eval_code():
         ax.axis('off')
     plt.show()
 if __name__ == '__main__':
-    train()
-    show_images()
-    show_code()
+    #train()
+    #show_images()
+    #show_code()
     eval_code()

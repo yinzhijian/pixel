@@ -66,10 +66,12 @@ class Net(nn.Module):
 def loss_function(recon_x, x, mu, logvar):
     #print(f"recon_x: {recon_x}, x:{x}")
     # 重构损失
-    BCE = F.binary_cross_entropy(recon_x.view(-1, 28*28), x.view(-1, 28*28), reduction='sum')
+    #BCE = F.binary_cross_entropy(recon_x.view(-1, 28*28), x.view(-1, 28*28), reduction='sum')
+    loss = F.mse_loss(recon_x,x, reduction='sum')
     # KL散度损失
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return (BCE + KLD)/ recon_x.size(0)
+    #return (BCE + KLD)/ recon_x.size(0)
+    return (loss + KLD)/ recon_x.size(0)
 
 
 def train():
@@ -177,7 +179,7 @@ def eval_code():
         ax.axis('off')
     plt.show()
 if __name__ == '__main__':
-    #train()
-    #show_images()
-    #show_code()
+    train()
+    show_images()
+    show_code()
     eval_code()
