@@ -200,6 +200,6 @@ def eval_code():
         ax.axis('off')
     plt.show()
 if __name__ == '__main__':
-    train_with_code_loss()
+    #train_with_code_loss()
     show_images()
     show_code()
